@@ -1,0 +1,9 @@
+[package]
+name = "termi-jump"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ggez = "0.9.3"
+rand = "0.8"
+crossterm = "0.27"
