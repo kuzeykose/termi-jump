@@ -256,7 +256,6 @@ fn draw_player(stdout: &mut impl Write, player: &Player, camera_y: f32) -> std::
 }
 
 fn draw_platforms(stdout: &mut impl Write, platforms: &[Platform], camera_y: f32) -> std::io::Result<()> {
-    println!("\n\n\n Drawing platforms: {:?}", platforms);
     for p in platforms {
         let screen_y = (p.y - camera_y) as u16;
         if screen_y < HEIGHT {
