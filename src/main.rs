@@ -9,6 +9,12 @@ use std::io::{stdout, Write};
 use std::time::{Duration, Instant};
 use std::thread;
 
+mod ai;
+mod game;
+
+use ai::{Experience, ReplayBuffer};
+use game::{GameState, Player, Platform};
+
 const WIDTH: u16 = 40;
 const HEIGHT: u16 = 30;
 const PLATFORM_COUNT: usize = 8;
@@ -16,28 +22,6 @@ const PLATFORM_WIDTH: u16 = 8;
 const GRAVITY: f32 = 0.2;
 const JUMP_STRENGTH: f32 = 2.0;
 const HORIZONTAL_SPEED: f32 = 2.0;
-
-struct Player {
-    x: f32,
-    y: f32,
-    vy: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct Platform {
-    x: u16,
-    y: f32,
-}
-
-struct GameState {
-    player: Player,
-    platforms: Vec<Platform>,
-    score: u32,
-    game_over: bool,
-    last_landed_platform: Option<Platform>,
-    camera_y: f32,
-    target_camera_y: f32,
-}
 
 fn main() -> std::io::Result<()> {
     let mut stdout = stdout();
@@ -63,6 +47,13 @@ fn main() -> std::io::Result<()> {
         target_camera_y: 0.0,
     };
     
+    let agent = ai::Agent::new().expect("Error creating agent");
+    
+    let mut replay_buffer = ReplayBuffer::new(10000);
+    let batch_size = 32;
+    let discount_factor = 0.95;
+    let mut frame_count = 0;
+
     let starting_platform = Platform {
         x: game_state.player.x as u16 - PLATFORM_WIDTH / 2,
         y: game_state.player.y + 1.0,
@@ -73,20 +64,29 @@ fn main() -> std::io::Result<()> {
     let tick_rate = Duration::from_millis(50);
     while !game_state.game_over {
         let start_time = Instant::now();
+        let state_vec = agent.get_feature_vector(&game_state);
 
         // --- INPUT ---
-        while event::poll(Duration::from_millis(0))? {
+        if event::poll(Duration::from_millis(0))? {
             if let Event::Key(key_event) = event::read()? {
-                match key_event.code {
-                    KeyCode::Char('a') | KeyCode::Left => game_state.player.x -= HORIZONTAL_SPEED,
-                    KeyCode::Char('d') | KeyCode::Right => game_state.player.x += HORIZONTAL_SPEED,
-                    KeyCode::Char('q') | KeyCode::Esc => game_state.game_over = true,
-                    _ => {}
+                if key_event.code == KeyCode::Char('q') || key_event.code == KeyCode::Esc {
+                    game_state.game_over = true;
                 }
             }
         }
+        
+        let action = agent.decide(&game_state);
+        let mut reward = 0.0;
 
         // --- UPDATE ---
+        let last_y = game_state.player.y;
+
+        if action == -1 {
+            game_state.player.x -= HORIZONTAL_SPEED;
+        } else if action == 1 {
+            game_state.player.x += HORIZONTAL_SPEED;
+        }
+
         game_state.player.vy += GRAVITY;
         game_state.player.y += game_state.player.vy;
 
@@ -104,11 +104,6 @@ fn main() -> std::io::Result<()> {
             game_state.player.x = 1.0;
         }
         
-        if game_state.player.y > game_state.camera_y + HEIGHT as f32 {
-            game_state.game_over = true;
-        }
-
-        // Collision and bouncing
         if game_state.player.vy > 0.0 {
             for p in &game_state.platforms {
                 let player_x = game_state.player.x as u16;
@@ -119,6 +114,10 @@ fn main() -> std::io::Result<()> {
                     if previous_y <= p.y && player_y >= p.y {
                         game_state.player.vy = -JUMP_STRENGTH;
                         game_state.player.y = p.y;
+                        
+                        if game_state.last_landed_platform.map_or(true, |last_p| last_p.y > p.y) {
+                            reward += 10.0; // Reward for landing on a new, higher platform
+                        }
                         game_state.last_landed_platform = Some(*p);
 
                         // If we landed on a high platform, schedule a scroll.
@@ -128,6 +127,32 @@ fn main() -> std::io::Result<()> {
                         }
                         break;
                     }
+                }
+            }
+        }
+
+        if game_state.player.y > game_state.camera_y + HEIGHT as f32 {
+            game_state.game_over = true;
+            reward = -100.0; // Penalty for dying
+        }
+
+        // Reward for vertical progress
+        reward += (last_y - game_state.player.y) * 0.1;
+
+        let next_state_vec = agent.get_feature_vector(&game_state);
+        replay_buffer.push(Experience {
+            state: state_vec,
+            action: action,
+            reward: reward,
+            next_state: next_state_vec,
+            done: game_state.game_over,
+        });
+        
+        frame_count += 1;
+        if frame_count % 10 == 0 { // Train every 10 frames
+            if let Some(batch) = replay_buffer.sample(batch_size) {
+                if let Err(e) = agent.train(&batch, discount_factor) {
+                    eprintln!("Error training agent: {}", e);
                 }
             }
         }
